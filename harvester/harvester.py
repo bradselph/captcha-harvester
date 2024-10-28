@@ -10,22 +10,14 @@ import os
 import datetime
 from distutils.dir_util import copy_tree
 import logging
-
-
-LOGIN_URL = 'https://accounts.google.com'
-LOGGED_URL = 'https://myaccount.google.com'
-LOGIN_AUTO_CLOSE_URL = 'https://www.google.com'
-
-YOUTUBE_URL = 'https://www.youtube.com/'
-YOUTUBE_VIDEO_URL_PREFIX = 'https://www.youtube.com/watch?v='
-
-CAPTCHA_JS_URL = 'https://www.google.com/recaptcha/api.js'
-
-DEFAULT_CHROME_PATHS = ('C:/Program Files (x86)/Google/Chrome/Application/chrome.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe')
-
+import sys
 
 class Harvester(Browser):
     harvester_count = 0
+
+    BASE_DIR = pathlib.Path(os.path.dirname(os.path.realpath(__file__)))
+    PROFILES_DIR = BASE_DIR / 'chrome_profiles' / 'harvester'
+    EXTENSION_BLUEPRINT_DIR = BASE_DIR / 'extension'
 
     def __init__(self, url: str, sitekey: str, proxy: str = None, log_in: bool = False,
                  chrome_executable: str = None, chromedriver_executable: str = None,
@@ -33,8 +25,10 @@ class Harvester(Browser):
                  open_youtube: bool = False, harvester_width: int = 420,
                  harvester_height: int = 600, youtube_width: int = 480,
                  youtube_height: int = 380):
+        """Initialize the Harvester"""
 
         self.setup_paths()
+
         super().__init__(
             executable=chromedriver_executable,
             options=self.get_chrome_options(proxy),
@@ -49,51 +43,28 @@ class Harvester(Browser):
         )
 
     def setup_paths(self):
-        os.chdir(os.path.dirname(os.path.realpath(__file__)))
-        self.profile_path = pathlib.Path(f'chrome_profiles/harvester/{Harvester.harvester_count}')
+        """Setup all required directories and paths"""
+        self.PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+
+        self.profile_path = self.PROFILES_DIR / str(Harvester.harvester_count)
         self.extension_path = self.profile_path / 'extension'
         self.proxy_auth_extension_path = self.profile_path / 'proxy_auth_extension'
 
-        pathlib.Path('chrome_profiles/harvester').mkdir(parents=True, exist_ok=True)
         self.profile_path.mkdir(parents=True, exist_ok=True)
+        self.extension_path.mkdir(parents=True, exist_ok=True)
         self.proxy_auth_extension_path.mkdir(parents=True, exist_ok=True)
 
-        extension_blueprint_path = pathlib.Path(__file__).parent / 'extension'
-        copy_tree(str(extension_blueprint_path), str(self.extension_path))
-
-    def get_chrome_options(self, proxy):
-        options = [
-            f'--user-data-dir={self.profile_path}',
-            '--disable-infobars',
-            '--disable-menubar',
-            '--disable-toolbar',
-            '--mute-audio',
-            '--log-level=3',
-            "--disable-notifications",
-        ]
-
-        if proxy:
-            if len(proxy.split(':')) >= 4:
-                options.append(f'--proxy-server={proxy.split(":")[0]}:{proxy.split(":")[1]}')
-                self.setup_proxy_auth(proxy)
-            else:
-                options.append(f'--proxy-server={proxy}')
-
-        return options
-
-    def get_experimental_options(self):
-        return {
-            'prefs': {
-                'profile': {'exit_type': 'Normal'},
-                'credentials_enable_service': False,
-                'profile.password_manager_enabled': False
-            }
-        }
+        if self.EXTENSION_BLUEPRINT_DIR.exists():
+            copy_tree(str(self.EXTENSION_BLUEPRINT_DIR), str(self.extension_path))
+        else:
+            logging.error(f"Extension blueprint directory not found at: {self.EXTENSION_BLUEPRINT_DIR}")
+            raise FileNotFoundError(f"Extension directory not found: {self.EXTENSION_BLUEPRINT_DIR}")
 
     def configure_instance(self, url, sitekey, proxy, log_in, chrome_executable,
                          download_js, auto_close_login, open_youtube,
                          harvester_width, harvester_height,
                          youtube_width, youtube_height):
+        """Configure the harvester instance"""
         self.url = url
         self.sitekey = sitekey
         self.proxy = proxy
