@@ -1,16 +1,15 @@
-# Importing local packages
 from .browser import Browser
-# Importing external packages
-from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 import requests
 from requests_html import HTML
-# Importing standard packages
 import pathlib
 import random
 import os
 import datetime
 from distutils.dir_util import copy_tree
+import logging
 
 
 LOGIN_URL = 'https://accounts.google.com'
@@ -28,34 +27,78 @@ DEFAULT_CHROME_PATHS = ('C:/Program Files (x86)/Google/Chrome/Application/chrome
 class Harvester(Browser):
     harvester_count = 0
 
-    os.chdir(os.path.dirname(os.path.realpath(__file__)))
-    pathlib.Path('chrome_profiles/harvester').mkdir(parents=True, exist_ok=True)
+    def __init__(self, url: str, sitekey: str, proxy: str = None, log_in: bool = False,
+                 chrome_executable: str = None, chromedriver_executable: str = None,
+                 download_js: bool = True, auto_close_login: bool = True,
+                 open_youtube: bool = False, harvester_width: int = 420,
+                 harvester_height: int = 600, youtube_width: int = 480,
+                 youtube_height: int = 380):
 
-    extension_blueprint_path = f'{pathlib.Path().absolute()}/extension'
+        self.setup_paths()
+        super().__init__(
+            executable=chromedriver_executable,
+            options=self.get_chrome_options(proxy),
+            experimental_options=self.get_experimental_options()
+        )
 
-    def __init__(self, url: str, sitekey: str, proxy: str = None, log_in: bool = False, chrome_executable: str = None, chromedriver_executable: str = None, download_js: bool = True, auto_close_login: bool = True, open_youtube: bool = False, harvester_width: int = 420, harvester_height: int = 600, youtube_width: int = 480, youtube_height: int = 380):
-        """
-        :param url: Url of website you want to harvest captcha on.
-        :param sitekey: Sitekey of website you want to harvest captcha on, can be found in HTML elemement with class "g-recaptcha".
-        :param proxy: Proxy in "ip:port" or "ip:port:login:password"
-        :param log_in: True if you want to login to your Google account to have easier captchas, false if not.
-        :param chrome_executable: Path to chrome.exe that will be used to login to Google, if not provided, all paths from DEFAULT_CHROME_PATHS will be checked for presence of chrome.exe, if not found login process will be skipped.
-        :param chromedriver_executable: Path to chrome.exe.
-        :param download_js: True: download latest captcha js script, False: use js version stored in code.
-        :param auto_close_login: True: Chrome login window automatically closed after login, False: login window is not automatically closed.
-        :param width: Width of harvester window.
-        :param height: Height of harvester window.
-        :param open_youtube: True: open browser with YouTube, where by watching videos you can lower your captcha difficulty.
-        :param youtube_width: Width of youtube window.
-        :param youtube_height: Height of youtube window.
-        """
+        self.configure_instance(
+            url, sitekey, proxy, log_in, chrome_executable,
+            download_js, auto_close_login, open_youtube,
+            harvester_width, harvester_height,
+            youtube_width, youtube_height
+        )
 
+    def setup_paths(self):
+        os.chdir(os.path.dirname(os.path.realpath(__file__)))
+        self.profile_path = pathlib.Path(f'chrome_profiles/harvester/{Harvester.harvester_count}')
+        self.extension_path = self.profile_path / 'extension'
+        self.proxy_auth_extension_path = self.profile_path / 'proxy_auth_extension'
+
+        pathlib.Path('chrome_profiles/harvester').mkdir(parents=True, exist_ok=True)
+        self.profile_path.mkdir(parents=True, exist_ok=True)
+        self.proxy_auth_extension_path.mkdir(parents=True, exist_ok=True)
+
+        extension_blueprint_path = pathlib.Path(__file__).parent / 'extension'
+        copy_tree(str(extension_blueprint_path), str(self.extension_path))
+
+    def get_chrome_options(self, proxy):
+        options = [
+            f'--user-data-dir={self.profile_path}',
+            '--disable-infobars',
+            '--disable-menubar',
+            '--disable-toolbar',
+            '--mute-audio',
+            '--log-level=3',
+            "--disable-notifications",
+        ]
+
+        if proxy:
+            if len(proxy.split(':')) >= 4:
+                options.append(f'--proxy-server={proxy.split(":")[0]}:{proxy.split(":")[1]}')
+                self.setup_proxy_auth(proxy)
+            else:
+                options.append(f'--proxy-server={proxy}')
+
+        return options
+
+    def get_experimental_options(self):
+        return {
+            'prefs': {
+                'profile': {'exit_type': 'Normal'},
+                'credentials_enable_service': False,
+                'profile.password_manager_enabled': False
+            }
+        }
+
+    def configure_instance(self, url, sitekey, proxy, log_in, chrome_executable,
+                         download_js, auto_close_login, open_youtube,
+                         harvester_width, harvester_height,
+                         youtube_width, youtube_height):
         self.url = url
         self.sitekey = sitekey
         self.proxy = proxy
         self.log_in = log_in
         self.chrome_executable = chrome_executable
-        self.chromedriver_executable = chromedriver_executable
         self.download_js = download_js
         self.auto_close_login = auto_close_login
         self.open_youtube = open_youtube
@@ -64,14 +107,8 @@ class Harvester(Browser):
         self.youtube_width = youtube_width
         self.youtube_height = youtube_height
 
-        self.id = Harvester.harvester_count
-
-        self.profile_path = f'{pathlib.Path().absolute()}/chrome_profiles/harvester/{self.id}'
-        self.extension_path = f'{self.profile_path}/extension'
-        self.proxy_auth_extension_path = f'{self.profile_path}/proxy_auth_extension'
-
-        self.response_queue = list()
-        self.control_element = f'controlElement{random.randint(0, 10 ** 10)}'
+        self.response_queue = []
+        self.control_element = f'controlElement{random.randint(0, 10**10)}'
         self.is_youtube_setup = False
         self.ticking = False
         self.closed = False
@@ -291,59 +328,299 @@ class Harvester(Browser):
 
     @staticmethod
     def get_sitekey(url: str) -> str:
-        # NOTE. In HTML of provided website need to be an element with "g-recaptcha" class and "data-sitekey" tag or there need to be JS script where sitekey is set like: 'sitekey': 'example_sitekey'
         try:
-            response = requests.get(url)
+            response = requests.get(url, timeout=10)
             if not response.ok:
-                return
-        except requests.exceptions.BaseHTTPError:
-            return
-        else:
+                return None
+
             html = HTML(html=response.text)
             captcha_element = html.find('.g-recaptcha')
-            sitekey = captcha_element[0].attrs.get('data-sitekey') if captcha_element else None
-            if sitekey:
-                return sitekey
-            html_formated = ''.join(response.text.split())
-            sitekey_index = html_formated.find('sitekey')
-            return html_formated[sitekey_index + 10:sitekey_index + 50] if sitekey_index != -1 and len(html_formated) > sitekey_index + 50 else None
+
+            if captcha_element:
+                return captcha_element[0].attrs.get('data-sitekey')
+
+            # Try finding in script tags
+            html_formatted = ''.join(response.text.split())
+            sitekey_index = html_formatted.find('sitekey')
+
+            if sitekey_index != -1:
+                return html_formatted[sitekey_index + 10:sitekey_index + 50].split("'")[0]
+
+        except Exception as e:
+            logging.error(f"Failed to get sitekey: {e}")
+
+        return None
+
+    def setup_proxy_auth(self, proxy):
+        proxy_parts = proxy.split(':')
+        manifest_json = self.get_proxy_manifest()
+        background_js = self.get_proxy_background_js(proxy_parts[2], proxy_parts[3])
+
+        with open(self.proxy_auth_extension_path / 'manifest.json', 'w') as f:
+            f.write(manifest_json)
+        with open(self.proxy_auth_extension_path / 'background.js', 'w') as f:
+            f.write(background_js)
 
     @staticmethod
-    def get_proxy_auth_extension(proxy: str) -> tuple:
-        proxy = proxy.split(':')
-        manifest_json = """{
-    "manifest_version": 2,
-    "version": "0.1",
-    "name": "Chrome Proxy",
-    "permissions": [
-        "tabs",
-        "unlimitedStorage",
-        "proxy",
-        "webRequestBlocking",
-        "storage",
-        "<all_urls>",
-        "webRequest"
-    ],
-    "background": {
-        "scripts": ["background.js"]
-    }
-}
-        """
-        background_js = """
+    def get_proxy_manifest():
+        return '''{
+            "version": "1.0.0",
+            "manifest_version": 2,
+            "name": "Chrome Proxy",
+            "permissions": [
+                "proxy",
+                "tabs",
+                "unlimitedStorage",
+                "storage",
+                "<all_urls>",
+                "webRequest",
+                "webRequestBlocking"
+            ],
+            "background": {
+                "scripts": ["background.js"]
+            }
+        }'''
 
-function callbackFn(details) {
-    return {
-        authCredentials: {
-            username: "%s",
-            password: "%s"
-        }
-    };
-}
+    @staticmethod
+    def get_proxy_background_js(username, password):
+        return f'''
+        var config = {{
+            mode: "fixed_servers",
+            rules: {{
+                singleProxy: {{
+                    scheme: "http",
+                    host: "{username}",
+                    port: parseInt({password})
+                }},
+                bypassList: ["localhost"]
+            }}
+        }};
 
-chrome.webRequest.onAuthRequired.addListener(
+        chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
+
+        function callbackFn(details) {{
+            return {{
+                authCredentials: {{
+                    username: "{username}",
+                    password: "{password}"
+                }}
+            }};
+        }}
+
+        chrome.webRequest.onAuthRequired.addListener(
             callbackFn,
-            {urls: ["<all_urls>"]},
+            {{urls: ["<all_urls>"]}},
             ['blocking']
-);
-        """ % (proxy[2], proxy[3])
-        return manifest_json, background_js
+        );
+        '''
+
+    def setup(self) -> None:
+        if not self.is_open or self.is_set:
+            return
+
+        try:
+            self.inject_harvester_html()
+            self.configure_harvester_style()
+            self.inject_recaptcha_script()
+        except Exception as e:
+            logging.error(f"Failed to setup harvester: {e}")
+            self.closed = True
+
+    def inject_harvester_html(self):
+        harvester_html = f'''
+        <html>
+            <head>
+                <title>Harvester {self.id}</title>
+                <script src="https://www.google.com/recaptcha/api.js" async defer></script>
+            </head>
+            <body>
+                <div class="{self.control_element}"></div>
+                <div id="container">
+                    <div id="g-recaptcha" class="g-recaptcha" data-sitekey="{self.sitekey}"></div>
+                </div>
+            </body>
+        </html>
+        '''
+        self.execute_script(f"document.documentElement.innerHTML = `{harvester_html}`;")
+
+    def configure_harvester_style(self):
+        styles = {
+            'container': {
+                'width': '305px',
+                'margin-left': 'auto',
+                'margin-right': 'auto',
+                'margin-top': '242px'
+            }
+        }
+
+
+    def configure_harvester_style(self):
+        styles = {
+                'container': {
+                        'width': '305px',
+                        'margin-left': 'auto',
+                        'margin-right': 'auto',
+                        'margin-top': '242px'
+                }
+        }
+
+        for element, style in styles.items():
+            style_str = '; '.join(f'{k}: {v}' for k, v in style.items())
+            self.execute_script(f"document.getElementById('{element}').style = '{style_str}';")
+
+        # Add positioning loop
+        self.execute_script('''
+            var tick = function(){
+                var divs = document.querySelector("body").children;
+                for(i=0; i<divs.length; i++){
+                    divs[i].style.left = 0;
+                    divs[i].style.top = 0;
+                }
+                setTimeout(tick, 100);
+            };
+            tick();
+        ''')
+
+    def inject_recaptcha_script(self):
+        if self.download_js:
+            try:
+                response = requests.get('https://www.google.com/recaptcha/api.js', timeout=10)
+                if response.ok:
+                    captcha_js = response.text
+                else:
+                    captcha_js = self.get_fallback_recaptcha_script()
+            except:
+                captcha_js = self.get_fallback_recaptcha_script()
+        else:
+            captcha_js = self.get_fallback_recaptcha_script()
+
+        self.execute_script(captcha_js)
+
+    @staticmethod
+    def get_fallback_recaptcha_script():
+        return """
+        (function(){
+            var w=window,C='___grecaptcha_cfg';
+            var cfg=w[C]=w[C]||{};
+            var gr=w['grecaptcha']=w['grecaptcha']||{};
+            gr.ready=gr.ready||function(f){(cfg['fns']=cfg['fns']||[]).push(f);};
+            w['__recaptcha_api']='https://www.google.com/recaptcha/api2/';
+            (cfg['render']=cfg['render']||[]).push('explicit');
+            w['__google_recaptcha_client']=true;
+            var d=document,po=d.createElement('script');
+            po.type='text/javascript';
+            po.async=true;
+            po.src='https://www.google.com/recaptcha/api.js?onload=grecaptchaCallback';
+            var e=d.querySelector('script[nonce]'),n=e&&(e['nonce']||e.getAttribute('nonce'));
+            if(n){po.setAttribute('nonce',n);}
+            var s=d.getElementsByTagName('script')[0];
+            s.parentNode.insertBefore(po,s);
+        })();
+        """
+
+    def get_response(self) -> dict:
+        """Get the current captcha response if available"""
+        if not self.is_open:
+            return {}
+
+        try:
+            response = self.execute_script('return grecaptcha.getResponse();')
+            if response:
+                return {
+                        'timestamp': datetime.datetime.now(),
+                        'response': response
+                }
+        except Exception as e:
+            logging.error(f"Failed to get response: {e}")
+
+        return {}
+
+    def reset_harvester(self) -> None:
+        """Reset the captcha for a new solve"""
+        if not self.is_open:
+            return
+
+        try:
+            self.execute_script('grecaptcha.reset();')
+        except Exception as e:
+            logging.error(f"Failed to reset harvester: {e}")
+
+    def window_size_check(self) -> None:
+        """Ensure window size remains correct"""
+        if not self.is_open:
+            return
+
+        try:
+            size = self.get_window_size()
+            if size['width'] != self.harvester_width or size['height'] != self.harvester_height:
+                self.set_window_size(self.harvester_width, self.harvester_height)
+        except Exception as e:
+            logging.error(f"Failed to check/set window size: {e}")
+
+    def setup_youtube(self) -> None:
+        """Setup YouTube window for solving assistance"""
+        if not self.is_open or self.is_youtube_setup or not self.open_youtube:
+            return
+
+        try:
+            self.execute_script(
+                    f"window.open('https://www.youtube.com', '_blank', "
+                    f"'toolbar=no').resizeTo({self.youtube_width}, {self.youtube_height});"
+            )
+
+            if len(self.window_handles) > 1:
+                self.switch_to.window(self.window_handles[1])
+
+                # Find and click a video
+                video_links = self.find_elements(By.CSS_SELECTOR, 'a#video-title')
+                for link in video_links:
+                    if link.get_attribute('href'):
+                        self.get(link.get_attribute('href'))
+                        self.refresh()
+                        break
+
+                self.is_youtube_setup = True
+                self.switch_to.window(self.window_handles[0])
+
+        except Exception as e:
+            logging.error(f"Failed to setup YouTube: {e}")
+
+    def tick(self) -> None:
+        """Main update loop for the harvester"""
+        self.ticking = True
+
+        try:
+            self.setup()
+            self.setup_youtube()
+            self.response_check()
+            self.window_size_check()
+        except Exception as e:
+            logging.error(f"Harvester tick failed: {e}")
+            self.closed = True
+
+        self.ticking = False
+
+    def response_check(self) -> None:
+        """Check for and handle new captcha responses"""
+        response = self.get_response()
+        if response:
+            self.reset_harvester()
+            self.response_queue.append(response)
+
+    @property
+    def is_set(self) -> bool:
+        """Check if harvester is properly configured"""
+        try:
+            return bool(self.find_elements(By.CLASS_NAME, self.control_element))
+        except Exception:
+            return False
+
+    def pull_response_queue(self) -> list:
+        """Get and clear all responses"""
+        responses = self.response_queue.copy()
+        self.response_queue.clear()
+        return responses
+
+    def pull_response(self) -> dict:
+        """Get and remove oldest response"""
+        return self.response_queue.pop(0) if self.response_queue else {}
