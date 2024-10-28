@@ -20,6 +20,58 @@ class Harvester(Browser):
     PROFILES_DIR = BASE_DIR / 'chrome_profiles' / 'harvester'
     EXTENSION_BLUEPRINT_DIR = BASE_DIR / 'extension'
 
+
+    @staticmethod
+    def get_sitekey(url: str) -> str:
+        """
+        Get reCAPTCHA sitekey from the webpage.
+
+        Args:
+            url: URL to check for sitekey
+
+        Returns:
+            str: Sitekey if found, None otherwise
+        """
+        try:
+            headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+
+            response = requests.get(url, headers=headers, timeout=10)
+            if not response.ok:
+                logging.error(f"Failed to fetch URL: {url}, status code: {response.status_code}")
+                return None
+
+            html = HTML(html=response.text)
+            captcha_elements = html.find('.g-recaptcha')
+
+            if captcha_elements:
+                for element in captcha_elements:
+                    sitekey = element.attrs.get('data-sitekey')
+                    if sitekey:
+                        return sitekey
+
+            patterns = [
+                    r"sitekey:\s*['\"]([0-9A-Za-z\-_]+)['\"]",
+                    r"data-sitekey=['\"]([0-9A-Za-z\-_]+)['\"]",
+                    r"grecaptcha.execute\(['\"]([0-9A-Za-z\-_]+)['\"]",
+            ]
+
+            for pattern in patterns:
+                matches = re.findall(pattern, response.text)
+                if matches:
+                    return matches[0]
+
+            logging.warning(f"No sitekey found at URL: {url}")
+            return None
+
+        except requests.RequestException as e:
+            logging.error(f"Request failed for URL {url}: {str(e)}")
+            return None
+        except Exception as e:
+            logging.error(f"Unexpected error getting sitekey from {url}: {str(e)}")
+            return None
+
     def __init__(self, url: str, sitekey: str, proxy: str = None, log_in: bool = False,
                  chrome_executable: str = None, chromedriver_executable: str = None,
                  download_js: bool = True, auto_close_login: bool = True,
@@ -27,21 +79,37 @@ class Harvester(Browser):
                  harvester_height: int = 600, youtube_width: int = 480,
                  youtube_height: int = 380):
         """Initialize the Harvester"""
+        self.url = url
+        self.sitekey = sitekey
+        self.proxy = proxy
+        self.log_in = log_in
+        self.chrome_executable = chrome_executable
+        self.download_js = download_js
+        self.auto_close_login = auto_close_login
+        self.open_youtube = open_youtube
+        self.harvester_width = harvester_width
+        self.harvester_height = harvester_height
+        self.youtube_width = youtube_width
+        self.youtube_height = youtube_height
 
         self.setup_paths()
 
+        chrome_options = self.create_chrome_options()
+        experimental_options = self.create_experimental_options()
+
         super().__init__(
             executable=chromedriver_executable,
-            options=self.get_chrome_options(proxy),
-            experimental_options=self.get_experimental_options()
+            options=chrome_options,
+            experimental_options=experimental_options
         )
 
-        self.configure_instance(
-            url, sitekey, proxy, log_in, chrome_executable,
-            download_js, auto_close_login, open_youtube,
-            harvester_width, harvester_height,
-            youtube_width, youtube_height
-        )
+        self.response_queue = []
+        self.control_element = f'controlElement{random.randint(0, 10**10)}'
+        self.is_youtube_setup = False
+        self.ticking = False
+        self.closed = False
+
+        Harvester.harvester_count += 1
 
     def setup_paths(self):
         """Setup all required directories and paths"""
