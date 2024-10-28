@@ -2,6 +2,7 @@ from .browser import Browser
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
 import requests
 from requests_html import HTML
 import pathlib
@@ -78,6 +79,17 @@ class Harvester(Browser):
         self.youtube_width = youtube_width
         self.youtube_height = youtube_height
 
+        self.setup_paths()
+
+        chrome_options = self.create_chrome_options()
+        experimental_options = self.create_experimental_options()
+
+        super().__init__(
+            executable=chromedriver_executable,
+            options=chrome_options,
+            experimental_options=experimental_options
+        )
+
         self.response_queue = []
         self.control_element = f'controlElement{random.randint(0, 10**10)}'
         self.is_youtube_setup = False
@@ -85,14 +97,10 @@ class Harvester(Browser):
         self.closed = False
 
         Harvester.harvester_count += 1
-        pathlib.Path(self.profile_path).mkdir(parents=True, exist_ok=True)
-        pathlib.Path(self.proxy_auth_extension_path).mkdir(parents=True, exist_ok=True)
-        copy_tree(self.extension_blueprint_path, self.extension_path)
 
-        chrome_options = [
-            # f'--app={self.url}',
-            # Initially opening google to then redirect to harvest website, so when using proxy, the login popup will disappear
-            f'--app=http://www.google.com/',
+    def create_chrome_options(self) -> list:
+        """Create Chrome options for the browser"""
+        options = [
             f'--window-size={self.harvester_width},{self.harvester_height}',
             f'--user-data-dir={self.profile_path}',
             '--disable-infobars',
@@ -100,7 +108,10 @@ class Harvester(Browser):
             '--disable-toolbar',
             '--mute-audio',
             '--log-level=3',
-            "--disable-notifications",
+            '--disable-notifications',
+            '--disable-dev-shm-usage',
+            '--no-sandbox',
+            '--disable-gpu',
         ]
         chrome_experimental_options = {
             'prefs': {'profile': {'exit_type': 'Normal'}}
@@ -192,317 +203,102 @@ class Harvester(Browser):
 
         harvester_title = f'Harvester {self.id}'
         if self.proxy:
-            if self.use_proxy_extension:
-                harvester_title += f' (proxy: "{self.proxy.split(":")[0]}:{self.proxy.split(":")[1]}")'
+            if len(self.proxy.split(':')) >= 4:
+                options.append(f'--proxy-server={self.proxy.split(":")[0]}:{self.proxy.split(":")[1]}')
+                self.setup_proxy_auth(self.proxy)
+                options.append(f'--load-extension={self.proxy_auth_extension_path}')
             else:
-                harvester_title += f' (proxy: "{self.proxy}")'
-        harvester_icon = 'img/icon.png'
-        harvester_html = f'<html><head><link rel="icon" href="{harvester_icon}"><title>{harvester_title}</title><script src="{CAPTCHA_JS_URL}" async defer></script></head><body><div class="{self.control_element}"></div><div id="container"><div id="g-recaptcha" class="g-recaptcha" data-sitekey="{self.sitekey}"></div></div></body></html>'
-        harvester_loop_script = 'var tick = function(){var divs = document.querySelector("body").children;for(i=0; i<divs.length; i++){divs[i].style.left = 0;divs[i].style.top = 0;}setTimeout(tick, 100);};tick();'
-        harvester_container = 'document.getElementById("container")'
+                options.append(f'--proxy-server={self.proxy}')
 
-        scripts = (
-            f"document.documentElement.innerHTML = '{harvester_html}';",
-            f'{harvester_container}.style.width = "305px";',
-            f'{harvester_container}.style.marginLeft = "auto";',
-            f'{harvester_container}.style.marginRight = "auto";',
-            f'{harvester_container}.style.marginTop = "242px";',
-            harvester_loop_script,
-        )
+        return options
 
-        self.get(self.url) if self.current_url != self.url else None
+    def create_experimental_options(self) -> dict:
+        """Create experimental options for Chrome"""
+        return {
+            'prefs': {
+                'profile': {'exit_type': 'Normal'},
+                'credentials_enable_service': False,
+                'profile.password_manager_enabled': False
+            },
+            'excludeSwitches': ['enable-automation'],
+            'useAutomationExtension': False
+        }
 
-        for script in scripts:
-            self.execute_script(script)
-
-        if self.download_js:
-            try:
-                captcha_js = requests.get(CAPTCHA_JS_URL).text
-            except requests.RequestException:
-                pass
-
-        self.execute_script(captcha_js)
-
-    def get_response(self) -> dict:
-        if not self.is_open:
-            return dict()
-        response = self.execute_script('return grecaptcha.getResponse();')
-        return {'timestamp': datetime.datetime.now(), 'response': response} if response else dict()
-
-    def pull_response_queue(self) -> list:
-        response_queue, self.response_queue = self.response_queue, list()
-        return response_queue
-
-    def pull_response(self) -> dict:
-        return self.response_queue.pop(0) if self.response_queue else dict()
-
-    def reset_harvester(self) -> None:
-        if not self.is_open:
-            return
-
-        self.execute_script('grecaptcha.reset();')
-
-    def window_size_check(self) -> None:
-        if not self.is_open:
-            return
-
-        harvester_size = self.get_window_size()
-        if harvester_size['width'] != self.harvester_width or harvester_size['height'] != self.harvester_height:
-            self.set_window_size(self.harvester_width, self.harvester_height)
-
-    def response_check(self) -> None:
-        response = self.get_response()
-        if response:
-            self.reset_harvester()
-            self.response_queue.append(response)
-
-    def youtube_setup(self) -> None:
-        if not self.is_open or self.is_youtube_setup or not self.open_youtube:
-            return
-
-        self.execute_script(f"window.open('{YOUTUBE_URL}', '_blank', 'toolbar=no').resizeTo({self.youtube_width}, {self.youtube_height});")
-
-        if len(self.window_handles) > 1:
-            self.switch_to.window(self.window_handles[1])
-            for link in self.find_elements(By.TAG_NAME, 'a'):
-                if not link.get_attribute('href'):
-                    continue
-                if YOUTUBE_VIDEO_URL_PREFIX in link.get_attribute('href'):
-                    self.get(link.get_attribute('href'))
-                    self.refresh()
-                    break
-            self.is_youtube_setup = True
-
-        self.switch_to.window(self.window_handles[0])
-
-    def tick(self) -> None:
-        self.ticking = True
-        # This try except to be upgraded...
-        try:
-            # self.show_ip()
-            self.setup()
-            self.youtube_setup()
-            self.response_check()
-            self.window_size_check()
-        except WebDriverException as e:
-            print(e)
-            self.closed = True
-
-        self.ticking = False
-
-    @property
-    def is_set(self) -> bool:
-        try:
-            return True if self.find_elements(By.CLASS_NAME, self.control_element) else False
-        except:
-            return False
-
-    @staticmethod
-    def get_sitekey(url: str) -> str:
-        try:
-            response = requests.get(url, timeout=10)
-            if not response.ok:
-                return None
-
-            html = HTML(html=response.text)
-            captcha_element = html.find('.g-recaptcha')
-
-            if captcha_element:
-                return captcha_element[0].attrs.get('data-sitekey')
-
-            # Try finding in script tags
-            html_formatted = ''.join(response.text.split())
-            sitekey_index = html_formatted.find('sitekey')
-
-            if sitekey_index != -1:
-                return html_formatted[sitekey_index + 10:sitekey_index + 50].split("'")[0]
-
-        except Exception as e:
-            logging.error(f"Failed to get sitekey: {e}")
-
-        return None
-
-    def setup_proxy_auth(self, proxy):
+    def setup_proxy_auth(self, proxy: str) -> None:
+        """Setup proxy authentication if needed"""
         proxy_parts = proxy.split(':')
-        manifest_json = self.get_proxy_manifest()
-        background_js = self.get_proxy_background_js(proxy_parts[2], proxy_parts[3])
+        if len(proxy_parts) >= 4:
+            manifest_json = '''{
+                "version": "1.0.0",
+                "manifest_version": 2,
+                "name": "Chrome Proxy",
+                "permissions": [
+                    "proxy",
+                    "tabs",
+                    "unlimitedStorage",
+                    "storage",
+                    "<all_urls>",
+                    "webRequest",
+                    "webRequestBlocking"
+                ],
+                "background": {
+                    "scripts": ["background.js"]
+                }
+            }'''
 
-        with open(self.proxy_auth_extension_path / 'manifest.json', 'w') as f:
-            f.write(manifest_json)
-        with open(self.proxy_auth_extension_path / 'background.js', 'w') as f:
-            f.write(background_js)
+            background_js = f'''
+                var config = {{
+                    mode: "fixed_servers",
+                    rules: {{
+                        singleProxy: {{
+                            scheme: "http",
+                            host: "{proxy_parts[0]}",
+                            port: parseInt({proxy_parts[1]})
+                        }},
+                        bypassList: ["localhost"]
+                    }}
+                }};
 
-    @staticmethod
-    def get_proxy_manifest():
-        return '''{
-            "version": "1.0.0",
-            "manifest_version": 2,
-            "name": "Chrome Proxy",
-            "permissions": [
-                "proxy",
-                "tabs",
-                "unlimitedStorage",
-                "storage",
-                "<all_urls>",
-                "webRequest",
-                "webRequestBlocking"
-            ],
-            "background": {
-                "scripts": ["background.js"]
-            }
-        }'''
+                chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
 
-    @staticmethod
-    def get_proxy_background_js(username, password):
-        return f'''
-        var config = {{
-            mode: "fixed_servers",
-            rules: {{
-                singleProxy: {{
-                    scheme: "http",
-                    host: "{username}",
-                    port: parseInt({password})
-                }},
-                bypassList: ["localhost"]
-            }}
-        }};
-
-        chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
-
-        function callbackFn(details) {{
-            return {{
-                authCredentials: {{
-                    username: "{username}",
-                    password: "{password}"
+                function callbackFn(details) {{
+                    return {{
+                        authCredentials: {{
+                            username: "{proxy_parts[2]}",
+                            password: "{proxy_parts[3]}"
+                        }}
+                    }};
                 }}
-            }};
-        }}
 
-        chrome.webRequest.onAuthRequired.addListener(
-            callbackFn,
-            {{urls: ["<all_urls>"]}},
-            ['blocking']
-        );
-        '''
+                chrome.webRequest.onAuthRequired.addListener(
+                    callbackFn,
+                    {{urls: ["<all_urls>"]}},
+                    ['blocking']
+                );
+            '''
 
-    def setup(self) -> None:
-        if not self.is_open or self.is_set:
-            return
+            with open(self.proxy_auth_extension_path / 'manifest.json', 'w') as f:
+                f.write(manifest_json)
+            with open(self.proxy_auth_extension_path / 'background.js', 'w') as f:
+                f.write(background_js)
 
-        try:
-            self.inject_harvester_html()
-            self.configure_harvester_style()
-            self.inject_recaptcha_script()
-        except Exception as e:
-            logging.error(f"Failed to setup harvester: {e}")
-            self.closed = True
+    def setup_paths(self):
+        """Setup all required directories and paths"""
+        self.PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
-    def inject_harvester_html(self):
-        harvester_html = f'''
-        <html>
-            <head>
-                <title>Harvester {self.id}</title>
-                <script src="https://www.google.com/recaptcha/api.js" async defer></script>
-            </head>
-            <body>
-                <div class="{self.control_element}"></div>
-                <div id="container">
-                    <div id="g-recaptcha" class="g-recaptcha" data-sitekey="{self.sitekey}"></div>
-                </div>
-            </body>
-        </html>
-        '''
-        self.execute_script(f"document.documentElement.innerHTML = `{harvester_html}`;")
+        self.profile_path = self.PROFILES_DIR / str(Harvester.harvester_count)
+        self.extension_path = self.profile_path / 'extension'
+        self.proxy_auth_extension_path = self.profile_path / 'proxy_auth_extension'
 
-    def configure_harvester_style(self):
-        styles = {
-            'container': {
-                'width': '305px',
-                'margin-left': 'auto',
-                'margin-right': 'auto',
-                'margin-top': '242px'
-            }
-        }
+        self.profile_path.mkdir(parents=True, exist_ok=True)
+        self.extension_path.mkdir(parents=True, exist_ok=True)
+        self.proxy_auth_extension_path.mkdir(parents=True, exist_ok=True)
 
-
-    def configure_harvester_style(self):
-        styles = {
-                'container': {
-                        'width': '305px',
-                        'margin-left': 'auto',
-                        'margin-right': 'auto',
-                        'margin-top': '242px'
-                }
-        }
-
-        for element, style in styles.items():
-            style_str = '; '.join(f'{k}: {v}' for k, v in style.items())
-            self.execute_script(f"document.getElementById('{element}').style = '{style_str}';")
-
-        # Add positioning loop
-        self.execute_script('''
-            var tick = function(){
-                var divs = document.querySelector("body").children;
-                for(i=0; i<divs.length; i++){
-                    divs[i].style.left = 0;
-                    divs[i].style.top = 0;
-                }
-                setTimeout(tick, 100);
-            };
-            tick();
-        ''')
-
-    def inject_recaptcha_script(self):
-        if self.download_js:
-            try:
-                response = requests.get('https://www.google.com/recaptcha/api.js', timeout=10)
-                if response.ok:
-                    captcha_js = response.text
-                else:
-                    captcha_js = self.get_fallback_recaptcha_script()
-            except:
-                captcha_js = self.get_fallback_recaptcha_script()
+        if self.EXTENSION_BLUEPRINT_DIR.exists():
+            copy_tree(str(self.EXTENSION_BLUEPRINT_DIR), str(self.extension_path))
         else:
-            captcha_js = self.get_fallback_recaptcha_script()
-
-        self.execute_script(captcha_js)
-
-    @staticmethod
-    def get_fallback_recaptcha_script():
-        return """
-        (function(){
-            var w=window,C='___grecaptcha_cfg';
-            var cfg=w[C]=w[C]||{};
-            var gr=w['grecaptcha']=w['grecaptcha']||{};
-            gr.ready=gr.ready||function(f){(cfg['fns']=cfg['fns']||[]).push(f);};
-            w['__recaptcha_api']='https://www.google.com/recaptcha/api2/';
-            (cfg['render']=cfg['render']||[]).push('explicit');
-            w['__google_recaptcha_client']=true;
-            var d=document,po=d.createElement('script');
-            po.type='text/javascript';
-            po.async=true;
-            po.src='https://www.google.com/recaptcha/api.js?onload=grecaptchaCallback';
-            var e=d.querySelector('script[nonce]'),n=e&&(e['nonce']||e.getAttribute('nonce'));
-            if(n){po.setAttribute('nonce',n);}
-            var s=d.getElementsByTagName('script')[0];
-            s.parentNode.insertBefore(po,s);
-        })();
-        """
-
-    def get_response(self) -> dict:
-        """Get the current captcha response if available"""
-        if not self.is_open:
-            return {}
-
-        try:
-            response = self.execute_script('return grecaptcha.getResponse();')
-            if response:
-                return {
-                        'timestamp': datetime.datetime.now(),
-                        'response': response
-                }
-        except Exception as e:
-            logging.error(f"Failed to get response: {e}")
+            logging.error(f"Extension blueprint directory not found at: {self.EXTENSION_BLUEPRINT_DIR}")
+            raise FileNotFoundError(f"Extension directory not found: {self.EXTENSION_BLUEPRINT_DIR}")
 
         return {}
 
